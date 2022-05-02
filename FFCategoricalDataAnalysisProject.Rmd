@@ -1,0 +1,476 @@
+---
+title: "STA4224FinalProj"
+author: "William D."
+date: "4/22/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Preparation
+
+```{r libraries}
+library(nflfastR)
+library(nflreadr)
+library(tidyverse)
+library(ggimage)
+library(eeptools)
+#MASS function will be loaded later, if it is loaded now we cannot use the select() function in dplyr
+library(lubridate)
+library(gt)
+```
+
+`load_pbp()` is a function within the nflfastR package that loads play-by-play data for given NFL season(s). `calculate_player_stats()` is an nflfastR function that will summarize a players stats over the entire season rather than on a play-by-play basis. For my analysis, I will use 2021 data. I will also filter the data to include only the regular season, because that is when fantasy points are counted. 
+```{r load_data}
+pbp_21 <- load_pbp(2021)
+
+pbp_21 <- pbp_21 %>%
+  filter(season_type == "REG")
+
+stats_21 <- calculate_player_stats(pbp_21, weekly = FALSE)
+
+```
+
+
+Now, I will separate the two positions that I am interested in analyzing, running backs (RB) and wide receivers (WR). To do that, I will use nflreadR's `load_roster()` function, which includes what position each players play. This way, I can filter to only WRs for my WR dataset and to only RBs for my RB dataset. I will create a field called `player_name1` that will match the `player_name` field in the `stats_21` data set. 
+
+```{r}
+WR_names21 <- load_rosters(2021) %>%
+  filter(position == "WR") %>%
+  dplyr::select(position, full_name, first_name, last_name, team)
+WR_names21$player_name1 <- paste(substr(WR_names21$first_name,1, 1), WR_names21$last_name, sep = ".")
+
+RB_names21 <- load_rosters(2021) %>%
+  filter(position == "RB") %>%
+  select(position, full_name, first_name, last_name, team)
+RB_names21$player_name1 <- paste(substr(RB_names21$first_name,1, 1), RB_names21$last_name, sep = ".")
+```
+
+Now that I have separated positions and created a name field that matches the name field in the stats_21 data set, I will create separate data frames for the WR and RB positions. 
+
+```{r separate_dataframe}
+rbstats_2021 <- stats_21 %>%
+   group_by(player_name) %>%
+  filter(player_name %in% RB_names21$player_name1, carries > 40) %>%
+  mutate(nameteam = paste(player_name, recent_team, sep = "")) 
+
+wrstats_2021 <- stats_21 %>%
+   group_by(player_name) %>%
+  filter(player_name %in% WR_names21$player_name1, receptions >20) %>%
+  mutate(nameteam = paste(player_name, recent_team, sep = "")) 
+
+rb_response <- rbstats_2021 %>%
+  select(player_name, nameteam, fantasy_points_ppr)
+
+wr_response <- wrstats_2021 %>%
+  select(player_name, nameteam, fantasy_points_ppr)
+
+
+```
+
+I will be creating categories from the `fantasy_points_ppr` field of these data frames to use as the response for my analysis. For example, if a RB finished in the top 12 in total fantasy points, they will be considered a RB1. If a RB finished in position 13-24 in total fantasy points, they will be considered a RB2. If they finished between position 24-36, they will be considered a RB3. Finishing beteeen 36-48 will be RB4. The categories will be created the same way for WRs. For my parameters, I will be using age, height, and weight. I will extract players' birth date, height, and weight using nflfastR's `fast_scraper_roster()` function. I will remove players with no fantasy points using the dplyr `drop_na()` function. For the `age` column, I will calculate player age as of the final game of the 2021 NFL season, which was January 9, 2022. 
+
+```{r dataframes_to_model}
+#RBs
+
+RB_variables_df <- fast_scraper_roster(2021) %>%
+  select(full_name, first_name, last_name, team, height, weight, birth_date, position) %>%
+  mutate(player_name1 = paste(substr(first_name, 1, 1), last_name, sep = "."),
+         nameteam = paste(player_name1, team, sep = "")) %>%
+  filter(position == "RB") %>%
+  left_join(rb_response, by = "nameteam") %>%
+  select(-player_name) %>%
+  drop_na(fantasy_points_ppr) %>%
+  arrange(-fantasy_points_ppr) %>%
+  mutate(ranking = rank(-fantasy_points_ppr)) %>%
+  filter(ranking <= 48) %>%
+  mutate(category = if_else(between(ranking, 1, 12), "RB1", if_else(between(ranking, 13, 24), "RB2", if_else(between(ranking, 25, 36), "RB3", "RB4")))) %>%
+    mutate(full_name = replace(full_name, full_name == "AJ Dillon", "A.J. Dillon")) %>%
+  mutate(age = age_calc(birth_date, enddate = as.Date("2022-01-09"), units = "years", precise = TRUE))
+
+
+
+#WRs
+WR_variables_df <- fast_scraper_roster(2021) %>%
+  select(full_name, first_name, last_name, team, height, weight, birth_date, position) %>%
+  mutate(player_name1 = paste(substr(first_name, 1, 1), last_name, sep = "."),
+         nameteam = paste(player_name1, team, sep = "")) %>%
+  filter(position == "WR") %>%
+  left_join(wr_response, by = "nameteam") %>%
+  select(-player_name) %>%
+  drop_na(fantasy_points_ppr) %>%
+  arrange(-fantasy_points_ppr) %>%
+  mutate(ranking = rank(-fantasy_points_ppr)) %>%
+  filter(ranking <= 48) %>%
+  mutate(category = if_else(between(ranking, 1, 12), "WR1", if_else(between(ranking, 13, 24), "WR2", if_else(between(ranking, 25, 36), "WR3", "WR4")))) %>%
+  mutate(full_name = replace(full_name, full_name == "DK Metcalf", "D.K. Metcalf")) %>%
+  mutate(age = age_calc(birth_date, enddate = as.Date("2022-01-09"), units = "years", precise = TRUE))
+
+```
+
+```{r salaries}
+RB_salaries <- read_csv("RB_salary.csv")
+RB_salaries <- RB_salaries[-c(1),]
+RB_salaries <- RB_salaries %>%
+  rename(full_name = Player) %>%
+  filter(full_name %in% RB_variables_df$full_name) %>%
+  select(full_name, APY) 
+
+
+
+WR_salaries <- read_csv("WR_salary.csv")
+WR_salaries <- WR_salaries[-c(1),]
+WR_salaries <- WR_salaries %>%
+  rename(full_name = Player) %>%
+  mutate(full_name = replace(full_name, full_name == "Michael Pittman, Jr.", "Michael Pittman"),
+         full_name = replace(full_name, full_name == "Cedrick Wilson Jr.", "Cedrick Wilson")) %>%
+  filter(full_name %in% WR_variables_df$full_name) %>%
+  select(full_name, APY)
+
+RB_variables_df <- RB_variables_df %>%
+  left_join(RB_salaries, by = "full_name")
+
+RB_variables_df$APY <- parse_number(RB_variables_df$APY)
+RB_variables_df$APY[RB_variables_df$full_name == "J.D. McKissic"] = 3500000
+RB_variables_df$APY[RB_variables_df$full_name == "Devontae Booker"] = 3625000
+
+WR_variables_df <- WR_variables_df %>%
+  left_join(WR_salaries, by = "full_name")
+
+WR_variables_df$APY <- parse_number(WR_variables_df$APY)
+WR_variables_df$APY[WR_variables_df$full_name == "Cole Beasley"] = 7612500
+
+```
+
+```{r draft_position}
+RB_draft_position <- nflreadr::load_draft_picks(2011:2021) %>%
+  rename(full_name = pfr_name) %>%
+  filter(full_name %in% RB_variables_df$full_name) %>%
+  select(full_name, pick) 
+
+RB_variables_df <- RB_variables_df %>%
+  left_join(RB_draft_position, by = "full_name")
+
+WR_draft_position <- nflreadr::load_draft_picks(2011:2021) %>%
+  rename(full_name = pfr_name) %>%
+  filter(full_name %in% WR_variables_df$full_name) %>%
+  select(full_name, pick)
+
+WR_variables_df <- WR_variables_df %>% 
+  left_join(WR_draft_position, by = "full_name")
+
+#replacing undrafted players pick number with 263 (later than any pick in the draft)
+RB_variables_df$pick[is.na(RB_variables_df$pick)] = 263
+WR_variables_df$pick[is.na(WR_variables_df$pick)] = 263
+
+#re-scaling average yearly salary to millions of dollars
+RB_variables_df$APY <- RB_variables_df$APY / 1000000
+WR_variables_df$APY <- WR_variables_df$APY / 1000000
+```
+
+
+## Data Analysis
+
+Now that I have created a data frame that contains my predictors (age, weight, height) and my response (category), I am ready to create the models. I will start with the model that we learned in class, the latent variable response model. We can create this model in R using the MASS function `polr()`. 
+
+```{r RB_age_plot}
+ggplot(aes(x = age, y = weight, color = category), data = RB_variables_df) +
+  geom_point() + 
+  labs(title = "2021 RB Fantasy Finish Category by Age and Weight", x = "Age", y = "Weight", subtitle = "Figure 1", caption = "Data: nflfastR") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(face = "bold", hjust = 0.5)) 
+```
+```{r RB_height_plot}
+ggplot(aes(x = age, y = height, color = category), data = RB_variables_df) + 
+  geom_point()+ 
+  labs(title = "2021 RB Fantasy Finish Category by Age and Height", x = "Age", y = "Height", subtitle = "Figure 2", caption = "Data: nflfastR") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(face = "bold", hjust = 0.5)) 
+```
+
+
+```{r RB_weight_plot}
+ggplot(aes(x = APY, y = pick, color = category), data = RB_variables_df) + 
+  geom_point()+ 
+  labs(title = "2021 RB Fantasy Fantasy Finish Category by Average Yearly Salary and Draft Pick Number", x = "Average Salary per Year (Millions)", y = "Draft Pick", subtitle = "Figure 3", caption = "Data: nflfastR, OverTheCap") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 10), plot.subtitle = element_text(face = "bold", hjust = 0.5)) 
+``` 
+
+
+```{r RB_linear_model}
+RB_variables_df$height <- as.numeric(RB_variables_df$height)
+RB_variables_df$weight <- as.numeric(RB_variables_df$weight)
+RB_variables_df$category <- as.factor(RB_variables_df$category)
+
+
+
+
+RB_fit <- MASS::polr(category ~ age + height + weight + APY + pick, method = "logistic", data = RB_variables_df)
+summary(RB_fit)
+
+
+```
+
+```{r RB_latent_variable_estimate}
+RB_variables_df$latent_estimate <- as.matrix(RB_variables_df[,c( "age", "height",  "weight", "APY", "pick")])%*%coefficients(RB_fit)
+```
+
+
+Now that I have a column of latent variable estimates, I will arrange the data frame in descending order by that column to see what RBs my model predicted to be RB1-RB4. 
+
+```{r predicted_category}
+RB_variables_df <- RB_variables_df %>%
+  arrange(latent_estimate) %>%
+  mutate(latent_rank = rank(latent_estimate))
+
+predict_rb1 <- RB_variables_df %>%
+  filter(between(latent_rank, 1, 12)) %>%
+  dplyr::select(player_name1, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted RB1s", subtitle = "Figure 7") %>%
+gtsave("fig7.png")
+
+predict_rb1
+
+predict_rb2 <- RB_variables_df %>%
+  filter(between(latent_rank, 13, 24)) %>%
+  dplyr::select(player_name1, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted RB2s", subtitle = "Figure 8") %>%
+gtsave("fig8.png")
+
+predict_rb2
+
+predict_rb3 <- RB_variables_df %>%
+  filter(between(latent_rank, 25, 36)) %>%
+  dplyr::select(player_name1, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted RB3s", subtitle = "Figure 9") %>% 
+gtsave("fig9.png")
+
+predict_rb3
+
+predict_rb4 <- RB_variables_df %>%
+  filter(between(latent_rank, 37, 48)) %>%
+  dplyr::select(player_name1, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted RB4s", subtitle = "Figure 10") %>%
+gtsave("fig10.png")
+
+predict_rb4
+```
+
+Simulating epsilons:
+```{r RB_sim}
+set.seed(12)
+
+sim.result<- array(0, c(1000,48))
+for(i in 1:1000){
+epsilon_i <- rlogis(48)
+sim.result[i,]<-
+cut(as.numeric(order(RB_variables_df$latent_estimate + epsilon_i)), breaks= c(0, 12.5, 24.5, 36.5, 50),label=FALSE)
+}
+```
+
+```{r RB_Category_Probability}
+
+for(i in 1:48){
+  RB_variables_df$RB1_probability[i] <- as.numeric(table(sim.result[,i])[1])/1000
+  RB_variables_df$RB2_probability[i] <- as.numeric(table(sim.result[,i])[2])/1000
+  RB_variables_df$RB3_probability[i] <- as.numeric(table(sim.result[,i])[3])/1000
+  RB_variables_df$RB4_probability[i] <- as.numeric(table(sim.result[,i])[4])/1000
+}
+
+```
+
+
+```{r RB_tables}
+RB_variables_df %>%
+  select(player_name1, category, latent_rank, RB1_probability, RB2_probability, RB3_probability, RB4_probability) %>%
+  filter(between(latent_rank, 1, 12)) %>%
+  gt() %>%
+  tab_header(title = "RB Category Probabilities for Predicted RB1s", subtitle = "Figure 11") %>% 
+  gtsave("fig11.png")
+
+RB_variables_df %>%
+  select(player_name1, category, latent_rank, RB1_probability, RB2_probability, RB3_probability, RB4_probability) %>%
+  filter(between(latent_rank, 13, 24)) %>%
+  gt() %>%
+  tab_header(title = "RB Category Probabilities for Predicted RB2s", subtitle = "Figure 12") %>% 
+  gtsave("fig12.png")
+
+RB_variables_df %>%
+  select(player_name1, category, latent_rank, RB1_probability, RB2_probability, RB3_probability, RB4_probability) %>%
+  filter(between(latent_rank, 25, 36)) %>%
+  gt() %>%
+  tab_header(title = "RB Category Probabilities for Predicted RB3s", subtitle = "Figure 13") %>% 
+  gtsave("fig13.png")
+
+RB_variables_df %>%
+  select(player_name1, category, latent_rank, RB1_probability, RB2_probability, RB3_probability, RB4_probability) %>%
+  filter(between(latent_rank, 37, 48)) %>%
+  gt() %>%
+  tab_header(title = "RB Category Probabilities for Predicted RB4s", subtitle = "Figure 14") %>% 
+  gtsave("fig14.png")
+```
+
+
+## Tree Model
+
+Now, I will create a tree model using the `rpart()` function from the `rpart` package
+```{r RB_tree_model}
+RB_variables_df$numeric_category <- ifelse(RB_variables_df$category == "RB1", 1, ifelse(RB_variables_df$category == "RB2", 2, ifelse(RB_variables_df$category == "RB3", 3, 4)))
+library(rpart)
+RB_tree <- rpart(numeric_category ~ age + height + weight + APY +pick, method = "class", data = RB_variables_df)
+rpart.plot::rpart.plot(RB_tree, extra = 101)
+```
+
+
+## WR Analysis
+
+Now that the RB portion is done, I will do some exploratory data analysis and create the models for WRs. 
+
+```{r WR_age_plot}
+ggplot(aes(x = age, y = weight, colour = category), data = WR_variables_df) + 
+  geom_point() +
+  labs(title = "2021 WR Fantasy Finish Category by Age and Weight", x = "Age", y = "Weight", subtitle = "Figure 4", caption = "Data: nflfastR") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(face = "bold", hjust = 0.5)) 
+```
+```{r WR_weight_plot}
+ggplot(aes(x = age, y = height, colour = category), data = WR_variables_df) + 
+  geom_point() +
+  labs(title = "2021 WR Fantasy Finish Category by Age and Height", x = "Age", y = "Height", subtitle = "Figure 5", caption = "Data: nflfastR") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), plot.subtitle = element_text(face = "bold", hjust = 0.5))
+
+```
+```{r WR_salary_draft_plot}
+ggplot(aes(x = APY, y = pick, colour = category), data = WR_variables_df) + 
+  geom_point() +
+  labs(title = "2021 WR Fantasy Finish Category by Draft Pick Number and Average Yearly Salary", x = "Average Salary per Year (Millions)", y = "Pick", subtitle = "Figure 6", caption = "Data: nflfastR, OverTheCap") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 10), plot.subtitle = element_text(face = "bold", hjust = 0.5)) 
+
+```
+
+
+```{r WR_linear_model}
+WR_variables_df$height <- as.numeric(WR_variables_df$height)
+WR_variables_df$weight <- as.numeric(WR_variables_df$weight)
+WR_variables_df$category <- as.factor(WR_variables_df$category)
+
+
+WR_fit <- MASS::polr(category ~ age + height + weight + APY + pick, method = "logistic", data = WR_variables_df)
+summary(WR_fit)
+```
+```{r WR_latent_estimate}
+WR_variables_df$latent_estimate <- as.matrix(WR_variables_df[,c( "age", "height",  "weight", "APY", "pick")])%*%coefficients(WR_fit)
+```
+
+
+```{r WR_predicted_category}
+WR_variables_df <- WR_variables_df %>%
+  arrange(latent_estimate) %>%
+  mutate(latent_rank = rank(latent_estimate),
+         player_name = player_name1)
+
+
+
+predict_wr1 <- WR_variables_df %>%
+  filter(latent_rank<=12) %>%
+  select(player_name, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted WR1s", subtitle = "Figure 15") %>% 
+  gtsave("fig15.png")
+
+
+
+
+predict_wr2 <- WR_variables_df %>%
+  filter(between(latent_rank, 13, 24)) %>%
+  select(player_name, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted WR2s", subtitle = "Figure 16") %>% 
+  gtsave("fig16.png")
+
+
+
+predict_wr3 <- WR_variables_df %>%
+  filter(between(latent_rank, 25, 36)) %>%
+  select(player_name, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted WR3s", subtitle = "Figure 17") %>% 
+  gtsave("fig17.png")
+
+
+
+predict_wr4 <- WR_variables_df %>%
+  filter(between(latent_rank, 37, 48)) %>%
+  select(player_name, category, latent_rank) %>%
+  gt() %>%
+  tab_header(title = "Predicted WR4s", subtitle = "Figure 18") %>% 
+  gtsave("fig18.png")
+
+```
+
+```{r}
+
+sim.result2<- array(0, c(1000,48))
+for(i in 1:1000){
+epsilon_i <- rlogis(48)
+sim.result2[i,]<-
+cut(as.numeric(order(WR_variables_df$latent_estimate + epsilon_i)), breaks= c(0, 12.5, 24.5, 36.5, 50),label=FALSE)
+}
+
+as.numeric(table(sim.result2[,5])[3])/1000
+table(sim.result2[,1])
+```
+
+```{r Category_Probability}
+for(i in 1:48){
+  WR_variables_df$WR1_probability[i] <- as.numeric(table(sim.result2[,i])[1])/1000
+  WR_variables_df$WR2_probability[i] <- as.numeric(table(sim.result2[,i])[2])/1000
+  WR_variables_df$WR3_probability[i] <- as.numeric(table(sim.result2[,i])[3])/1000
+  WR_variables_df$WR4_probability[i] <- as.numeric(table(sim.result2[,i])[4])/1000
+}
+
+
+```
+```{r WR_tables}
+WR_variables_df %>%
+  select(player_name1, category, latent_rank, WR1_probability, WR2_probability, WR3_probability, WR4_probability) %>%
+  filter(between(latent_rank, 1, 12)) %>%
+  gt() %>%
+  tab_header(title = "WR Category Probabilities for Predicted WR1s", subtitle = "Figure 19") %>% 
+  gtsave("fig19.png")
+
+WR_variables_df %>%
+  select(player_name1, category, latent_rank, WR1_probability, WR2_probability, WR3_probability, WR4_probability) %>%
+  filter(between(latent_rank, 13, 24)) %>%
+  gt() %>%
+  tab_header(title = "WR Category Probabilities for Predicted WR2s", subtitle = "Figure 20") %>% 
+  gtsave("fig20.png")
+
+WR_variables_df %>%
+  select(player_name1, category, latent_rank, WR1_probability, WR2_probability, WR3_probability, WR4_probability) %>%
+  filter(between(latent_rank, 25, 36)) %>%
+  gt() %>%
+  tab_header(title = "WR Category Probabilities for Predicted WR3s", subtitle = "Figure 21") %>% 
+  gtsave("fig21.png")
+
+WR_variables_df %>%
+  select(player_name1, category, latent_rank, WR1_probability, WR2_probability, WR3_probability, WR4_probability) %>%
+  filter(between(latent_rank, 37, 48)) %>%
+  gt() %>%
+  tab_header(title = "WR Category Probabilities for Predicted WR4s", subtitle = "Figure 22") %>% 
+  gtsave("fig22.png")
+```
+
+
+```{r WR_tree}
+
+WR_variables_df$numeric_category <- ifelse(WR_variables_df$category == "WR1", 1, ifelse(WR_variables_df$category == "WR2", 2, ifelse(WR_variables_df$category == "WR3", 3, 4)))
+
+WR_tree <- rpart(numeric_category ~ age + height + weight + APY + pick, method = "class", data = WR_variables_df)
+rpart.plot::rpart.plot(WR_tree, extra = 1, digits = 4)
+```
+
+
